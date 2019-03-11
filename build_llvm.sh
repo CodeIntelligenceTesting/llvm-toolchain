@@ -52,8 +52,7 @@ cmake ../src/llvm \
       -DLLVM_EXTERNAL_CLANG_SOURCE_DIR=../src/cfe \
       -DLLVM_EXTERNAL_COMPILER_RT_SOURCE_DIR=../src/compiler-rt
 
-# Use one third of available CPUs
-make -j$(( ( $(nproc) + 2 ) / 3 ))
+make -j3
 cmake --build . --target install
 
 popd
