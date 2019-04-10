@@ -1,8 +1,5 @@
 #!/bin/bash
 
-export CC=clang
-export CXX=clang++
-
 set -eo pipefail
 
 LLVM_RELEASE=${LLVM_RELEASE:-}
@@ -40,9 +37,9 @@ cmake ../${SRC_DIR}/llvm \
       -DLLVM_ENABLE_OCAMLDOC=OFF \
       -DLLVM_TEMPORARILY_ALLOW_OLD_TOOLCHAIN=ON \
       -DLIBCXXABI_USE_LLVM_UNWINDER=YES \
-      -DLIBCXXABI_USE_COMPILER_RT=YES \
-      -DLIBCXX_USE_COMPILER_RT=YES \
       -DCMAKE_INSTALL_PREFIX=../${OUT_DIR}
+      # -DLIBCXXABI_USE_COMPILER_RT=YES \ # TODO(perl) we still need to figure out how to use compiler-rt here
+      # -DLIBCXX_USE_COMPILER_RT=YES \
 
 
 make -j8
