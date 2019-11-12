@@ -17,34 +17,18 @@ then
     tar xf llvmorg-${LLVM_RELEASE}.tar.gz
 fi
 
-OUT_DIR=llvm-${LLVM_RELEASE}
+export DESTDIR=$PWD/llvm-${LLVM_RELEASE}
 
 mkdir -p build
-mkdir -p ${OUT_DIR}
+mkdir -p ${DESTDIR}
 
 pushd build
 
-cmake ../${SRC_DIR}/llvm \
-      -DCMAKE_BUILD_TYPE="Release" \
-      -DLLVM_TARGETS_TO_BUILD="X86" \
-      -DLLVM_ENABLE_PROJECTS="clang;clang-tools-extra;libcxx;libcxxabi;compiler-rt;libunwind;lld" \
-      -DLLVM_BUILD_TOOLS=ON \
-      -DBUILD_SHARED_LIBS=ON \
-      -DLLVM_INCLUDE_EXAMPLES=OFF \
-      -DLLVM_INCLUDE_TESTS=ON \
-      -DLLVM_BUILD_TESTS=ON \
-      -DLLVM_ENABLE_BINDINGS=OFF \
-      -DLLVM_ENABLE_OCAMLDOC=OFF \
-      -DLLVM_TEMPORARILY_ALLOW_OLD_TOOLCHAIN=ON \
-      -DLIBCXXABI_USE_LLVM_UNWINDER=YES \
-      -DCMAKE_INSTALL_PREFIX=../${OUT_DIR}
-      # -DLIBCXXABI_USE_COMPILER_RT=YES \ # TODO(perl) we still need to figure out how to use compiler-rt here
-      # -DLIBCXX_USE_COMPILER_RT=YES \
-
-
-make -j8
-cmake --build . --target install
+cmake -G Ninja -C ../stage1.cmake ../${SRC_DIR}/llvm
+ninja cxx
+export LD_LIBRARY_PATH=$PWD/lib
+ninja stage2-install
 
 popd
 
-tar cJf llvm.tar.xz ${OUT_DIR}
+tar cJf llvm.tar.xz ${DESTDIR}
