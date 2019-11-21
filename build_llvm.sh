@@ -17,10 +17,12 @@ then
     tar xf llvmorg-${LLVM_RELEASE}.tar.gz
 fi
 
-export DESTDIR=$PWD/llvm-${LLVM_RELEASE}
+export DESTDIR=$PWD/destdir
+export PACKAGE_ROOT=$PWD/llvm-${LLVM_RELEASE}
 
 mkdir -p build
 mkdir -p ${DESTDIR}
+mkdir -p ${PACKAGE_ROOT}
 
 pushd build
 
@@ -31,4 +33,7 @@ ninja stage2-install
 
 popd
 
-tar cJf llvm.tar.xz ${DESTDIR}
+# Files are installed in /usr/local,  move them out.
+mv ${DESTDIR}/usr/local/* ${PACKAGE_ROOT}
+
+tar cJf llvm.tar.xz ${PACKAGE_ROOT}
