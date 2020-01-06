@@ -4,10 +4,8 @@ In order to support as many different platforms as possible with our toolchain, 
 
 We use the CentOS Docker builder provided in [build/docker/builders](../../build/docker/centos.Dockerfile).
 
-In order to build the toolchain, bind mount this directory into the container, make it the working directory and run the [build script](./build_llvm.sh):
-
-Make sure not to call the build script directly, but to enable the GCC 7 software collection first, since GCC 5 can not build current LLVM.
-
+Run the following command from this directory in order to build the toolchain.
+This uses the GCC 7 software collection, because GCC 5 cannot build current LLVM.
 
 ```
 docker run -e LLVM_RELEASE=9.0.1 -it \
