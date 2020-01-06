@@ -1,0 +1,474 @@
+diff --git a/clang/docs/SanitizerCoverage.rst b/clang/docs/SanitizerCoverage.rst
+--- a/clang/docs/SanitizerCoverage.rst
++++ b/clang/docs/SanitizerCoverage.rst
+@@ -289,6 +289,58 @@
+   // for every non-constant array index.
+   void __sanitizer_cov_trace_gep(uintptr_t Idx);
+ 
++Partially disabling instrumentation
++===================================
++
++It is sometimes useful to tell SanitizerCoverage to instrument only a subset of the
++functions in your target.
++With ``-fsanitize-coverage-whitelist=whitelist.txt``
++and ``-fsanitize-coverage-blacklist=blacklist.txt``,
++you can specify such a subset through the combination of a whitelist and a blacklist.
++
++SanitizerCoverage will only instrument functions that satisfy two conditions.
++First, the function should belong to a source file with a path that is both whitelisted
++and not blacklisted.
++Second, the function should have a mangled name that is both whitelisted and not blacklisted.
++
++The whitelist and blacklist format is similar to that of the sanitizer blacklist format.
++The default whitelist will match every source file and every function.
++The default blacklist will match no source file and no function.
++
++A common use case is to have the whitelist list folders or source files for which you want
++instrumentation and allow all function names, while the blacklist will opt out some specific
++files or functions that the whitelist loosely allowed.
++
++Here is an example whitelist:
++
++.. code-block:: none
++
++  # Enable instrumentation for a whole folder
++  src:bar/*
++  # Enable instrumentation for a specific source file
++  src:foo/a.cpp
++  # Enable instrumentation for all functions in those files
++  fun:*
++
++And an example blacklist:
++
++.. code-block:: none
++
++  # Disable instrumentation for a specific source file that the whitelist allowed
++  src:bar/b.cpp
++  # Disable instrumentation for a specific function that the whitelist allowed
++  fun:*myFunc*
++
++The use of ``*`` wildcards above is required because function names are matched after mangling.
++Without the wildcards, one would have to write the whole mangled name.
++
++Be careful that the paths of source files are matched exactly as they are provided on the clang
++command line.
++For example, the whitelist above would include file ``bar/b.cpp`` if the path was provided
++exactly like this, but would it would fail to include it with other ways to refer to the same
++file such as ``./bar/b.cpp``, or ``bar\b.cpp`` on Windows.
++So, please make sure to always double check that your lists are correctly applied.
++
+ Default implementation
+ ======================
+ 
+diff --git a/clang/include/clang/Basic/CodeGenOptions.h b/clang/include/clang/Basic/CodeGenOptions.h
+--- a/clang/include/clang/Basic/CodeGenOptions.h
++++ b/clang/include/clang/Basic/CodeGenOptions.h
+@@ -306,6 +306,16 @@
+   /// List of dynamic shared object files to be loaded as pass plugins.
+   std::vector<std::string> PassPlugins;
+ 
++  /// Path to whitelist file specifying which objects
++  /// (files, functions) should exclusively be instrumented
++  /// by sanitizer coverage pass.
++  std::vector<std::string> SanitizeCoverageWhitelistFiles;
++
++  /// Path to blacklist file specifying which objects
++  /// (files, functions) listed for instrumentation by sanitizer
++  /// coverage pass should actually not be instrumented.
++  std::vector<std::string> SanitizeCoverageBlacklistFiles;
++
+ public:
+   // Define accessors/mutators for code generation options of enumeration type.
+ #define CODEGENOPT(Name, Bits, Default)
+diff --git a/clang/include/clang/Basic/DiagnosticDriverKinds.td b/clang/include/clang/Basic/DiagnosticDriverKinds.td
+--- a/clang/include/clang/Basic/DiagnosticDriverKinds.td
++++ b/clang/include/clang/Basic/DiagnosticDriverKinds.td
+@@ -147,6 +147,10 @@
+   "invalid argument '%0' to -fdebug-prefix-map">;
+ def err_drv_malformed_sanitizer_blacklist : Error<
+   "malformed sanitizer blacklist: '%0'">;
++def err_drv_malformed_sanitizer_coverage_whitelist : Error<
++  "malformed sanitizer coverage whitelist: '%0'">;
++def err_drv_malformed_sanitizer_coverage_blacklist : Error<
++  "malformed sanitizer coverage blacklist: '%0'">;
+ def err_drv_duplicate_config : Error<
+   "no more than one option '--config' is allowed">;
+ def err_drv_config_file_not_exist : Error<
+diff --git a/clang/include/clang/Driver/Options.td b/clang/include/clang/Driver/Options.td
+--- a/clang/include/clang/Driver/Options.td
++++ b/clang/include/clang/Driver/Options.td
+@@ -966,6 +966,12 @@
+       Group<f_clang_Group>, Flags<[CoreOption, DriverOption]>,
+       HelpText<"Disable specified features of coverage instrumentation for "
+                "Sanitizers">, Values<"func,bb,edge,indirect-calls,trace-bb,trace-cmp,trace-div,trace-gep,8bit-counters,trace-pc,trace-pc-guard,no-prune,inline-8bit-counters">;
++def fsanitize_coverage_whitelist : Joined<["-"], "fsanitize-coverage-whitelist=">,
++    Group<f_clang_Group>, Flags<[CoreOption, DriverOption]>,
++    HelpText<"Restrict sanitizer coverage instrumentation exclusively to modules and functions that match the provided special case list, except the blacklisted ones">;
++def fsanitize_coverage_blacklist : Joined<["-"], "fsanitize-coverage-blacklist=">,
++    Group<f_clang_Group>, Flags<[CoreOption, DriverOption]>,
++    HelpText<"Disable sanitizer coverage instrumentation for modules and functions that match the provided special case list, even the whitelisted ones">;
+ def fsanitize_memory_track_origins_EQ : Joined<["-"], "fsanitize-memory-track-origins=">,
+                                         Group<f_clang_Group>,
+                                         HelpText<"Enable origins tracking in MemorySanitizer">;
+diff --git a/clang/include/clang/Driver/SanitizerArgs.h b/clang/include/clang/Driver/SanitizerArgs.h
+--- a/clang/include/clang/Driver/SanitizerArgs.h
++++ b/clang/include/clang/Driver/SanitizerArgs.h
+@@ -26,6 +26,8 @@
+   SanitizerSet TrapSanitizers;
+ 
+   std::vector<std::string> BlacklistFiles;
++  std::vector<std::string> CoverageWhitelistFiles;
++  std::vector<std::string> CoverageBlacklistFiles;
+   std::vector<std::string> ExtraDeps;
+   int CoverageFeatures = 0;
+   int MsanTrackOrigins = 0;
+diff --git a/clang/lib/CodeGen/BackendUtil.cpp b/clang/lib/CodeGen/BackendUtil.cpp
+--- a/clang/lib/CodeGen/BackendUtil.cpp
++++ b/clang/lib/CodeGen/BackendUtil.cpp
+@@ -215,7 +215,9 @@
+   Opts.Inline8bitCounters = CGOpts.SanitizeCoverageInline8bitCounters;
+   Opts.PCTable = CGOpts.SanitizeCoveragePCTable;
+   Opts.StackDepth = CGOpts.SanitizeCoverageStackDepth;
+-  PM.add(createSanitizerCoverageModulePass(Opts));
++  PM.add(createSanitizerCoverageModulePass(
++      Opts, CGOpts.SanitizeCoverageWhitelistFiles,
++      CGOpts.SanitizeCoverageBlacklistFiles));
+ }
+ 
+ // Check if ASan should use GC-friendly instrumentation for globals.
+diff --git a/clang/lib/Driver/SanitizerArgs.cpp b/clang/lib/Driver/SanitizerArgs.cpp
+--- a/clang/lib/Driver/SanitizerArgs.cpp
++++ b/clang/lib/Driver/SanitizerArgs.cpp
+@@ -199,6 +199,46 @@
+   return TrappingKinds;
+ }
+ 
++/// Parse -f(no-)?sanitize-(coverage-)?(white|black)list argument's values,
++/// diagnosing any invalid file paths.
++static void parseSpecialCaseListArg(const Driver &D,
++                                    const llvm::opt::ArgList &Args,
++                                    std::vector<std::string> &SCLFiles,
++                                    std::vector<std::string> &ExtraDeps,
++                                    llvm::opt::OptSpecifier SCLOptionID,
++                                    llvm::opt::OptSpecifier NoSCLOptionID,
++                                    unsigned MalformedSCLErrorDiagID) {
++  size_t ExtraDepsInitialSize = ExtraDeps.size();
++  for (const auto *Arg : Args) {
++    // Match -fsanitize-(coverage-)?(white|black)list
++    if (Arg->getOption().matches(SCLOptionID)) {
++      Arg->claim();
++      std::string SCLPath = Arg->getValue();
++      if (llvm::sys::fs::exists(SCLPath)) {
++        SCLFiles.push_back(SCLPath);
++        ExtraDeps.push_back(SCLPath);
++      } else {
++        D.Diag(clang::diag::err_drv_no_such_file) << SCLPath;
++      }
++    }
++    // Match -fno-sanitize-blacklist
++    else if (NoSCLOptionID.isValid() &&
++             Arg->getOption().matches(NoSCLOptionID)) {
++      Arg->claim();
++      SCLFiles.clear();
++      ExtraDeps.resize(ExtraDepsInitialSize);
++    }
++  }
++  // Validate whitelist or blacklist format.
++  if (SCLFiles.size() > 0) {
++    std::string SCLError;
++    std::unique_ptr<llvm::SpecialCaseList> SCL(
++        llvm::SpecialCaseList::create(SCLFiles, SCLError));
++    if (!SCL.get())
++      D.Diag(MalformedSCLErrorDiagID) << SCLError;
++  }
++}
++
+ bool SanitizerArgs::needsUbsanRt() const {
+   // All of these include ubsan.
+   if (needsAsanRt() || needsMsanRt() || needsHwasanRt() || needsTsanRt() ||
+@@ -548,31 +588,19 @@
+   // Setup blacklist files.
+   // Add default blacklist from resource directory.
+   addDefaultBlacklists(D, Kinds, BlacklistFiles);
+-  // Parse -f(no-)sanitize-blacklist options.
+-  for (const auto *Arg : Args) {
+-    if (Arg->getOption().matches(options::OPT_fsanitize_blacklist)) {
+-      Arg->claim();
+-      std::string BLPath = Arg->getValue();
+-      if (llvm::sys::fs::exists(BLPath)) {
+-        BlacklistFiles.push_back(BLPath);
+-        ExtraDeps.push_back(BLPath);
+-      } else {
+-        D.Diag(clang::diag::err_drv_no_such_file) << BLPath;
+-      }
+-    } else if (Arg->getOption().matches(options::OPT_fno_sanitize_blacklist)) {
+-      Arg->claim();
+-      BlacklistFiles.clear();
+-      ExtraDeps.clear();
+-    }
+-  }
+-  // Validate blacklists format.
+-  {
+-    std::string BLError;
+-    std::unique_ptr<llvm::SpecialCaseList> SCL(
+-        llvm::SpecialCaseList::create(BlacklistFiles, BLError));
+-    if (!SCL.get())
+-      D.Diag(clang::diag::err_drv_malformed_sanitizer_blacklist) << BLError;
+-  }
++  // Parse -f(no-)?sanitize-(coverage-)?(black|white)list options.
++  parseSpecialCaseListArg(D, Args, BlacklistFiles, ExtraDeps,
++                          options::OPT_fsanitize_blacklist,
++                          options::OPT_fno_sanitize_blacklist,
++                          clang::diag::err_drv_malformed_sanitizer_blacklist);
++  parseSpecialCaseListArg(
++      D, Args, CoverageWhitelistFiles, ExtraDeps,
++      options::OPT_fsanitize_coverage_whitelist, OptSpecifier(),
++      clang::diag::err_drv_malformed_sanitizer_coverage_whitelist);
++  parseSpecialCaseListArg(
++      D, Args, CoverageBlacklistFiles, ExtraDeps,
++      options::OPT_fsanitize_coverage_blacklist, OptSpecifier(),
++      clang::diag::err_drv_malformed_sanitizer_coverage_blacklist);
+ 
+   // Parse -f[no-]sanitize-memory-track-origins[=level] options.
+   if (AllAddedKinds & SanitizerKind::Memory) {
+@@ -925,6 +953,16 @@
+     BlacklistOpt += BLPath;
+     CmdArgs.push_back(Args.MakeArgString(BlacklistOpt));
+   }
++  for (const auto &CWLPath : CoverageWhitelistFiles) {
++    SmallString<64> CoverageWhitelistOpt("-fsanitize-coverage-whitelist=");
++    CoverageWhitelistOpt += CWLPath;
++    CmdArgs.push_back(Args.MakeArgString(CoverageWhitelistOpt));
++  }
++  for (const auto &CBLPath : CoverageBlacklistFiles) {
++    SmallString<64> CoverageBlacklistOpt("-fsanitize-coverage-blacklist=");
++    CoverageBlacklistOpt += CBLPath;
++    CmdArgs.push_back(Args.MakeArgString(CoverageBlacklistOpt));
++  }
+   for (const auto &Dep : ExtraDeps) {
+     SmallString<64> ExtraDepOpt("-fdepfile-entry=");
+     ExtraDepOpt += Dep;
+diff --git a/clang/lib/Frontend/CompilerInvocation.cpp b/clang/lib/Frontend/CompilerInvocation.cpp
+--- a/clang/lib/Frontend/CompilerInvocation.cpp
++++ b/clang/lib/Frontend/CompilerInvocation.cpp
+@@ -1111,6 +1111,8 @@
+   Opts.SanitizeCoveragePCTable = Args.hasArg(OPT_fsanitize_coverage_pc_table);
+   Opts.SanitizeCoverageStackDepth =
+       Args.hasArg(OPT_fsanitize_coverage_stack_depth);
++  Opts.SanitizeCoverageWhitelistFiles = Args.getAllArgValues(OPT_fsanitize_coverage_whitelist);
++  Opts.SanitizeCoverageBlacklistFiles = Args.getAllArgValues(OPT_fsanitize_coverage_blacklist);
+   Opts.SanitizeMemoryTrackOrigins =
+       getLastArgIntValue(Args, OPT_fsanitize_memory_track_origins_EQ, 0, Diags);
+   Opts.SanitizeMemoryUseAfterDtor =
+diff --git a/compiler-rt/test/sanitizer_common/TestCases/sanitizer_coverage_whitelist_blacklist.cc b/compiler-rt/test/sanitizer_common/TestCases/sanitizer_coverage_whitelist_blacklist.cc
+new file mode 100644
+--- /dev/null
++++ b/compiler-rt/test/sanitizer_common/TestCases/sanitizer_coverage_whitelist_blacklist.cc
+@@ -0,0 +1,118 @@
++// Tests -fsanitize-coverage-whitelist=whitelist.txt and
++// -fsanitize-coverage-blacklist=blacklist.txt with libFuzzer-like coverage
++// options
++
++// REQUIRES: has_sancovcc,stable-runtime
++// UNSUPPORTED: i386-darwin
++// XFAIL: ubsan,tsan
++// XFAIL: android && asan
++
++// RUN: echo -e "src:*\nfun:*"     > wl_all.txt
++// RUN: echo -e ""                 > wl_none.txt
++// RUN: echo -e "src:%s\nfun:*"    > wl_file.txt
++// RUN: echo -e "src:*\nfun:*bar*" > wl_bar.txt
++// RUN: echo -e "src:*\nfun:*foo*" > wl_foo.txt
++// RUN: echo -e "src:*"            > bl_all.txt
++// RUN: echo -e ""                 > bl_none.txt
++// RUN: echo -e "src:%s"           > bl_file.txt
++// RUN: echo -e "fun:*foo*"        > bl_foo.txt
++// RUN: echo -e "fun:*bar*"        > bl_bar.txt
++
++// Check inline-8bit-counters
++// RUN: echo 'section "__sancov_cntrs"'                                                                             >  patterns.txt
++// RUN: echo '%[0-9]\+ = load i8, i8\* getelementptr inbounds (\[[0-9]\+ x i8\], \[[0-9]\+ x i8\]\* @__sancov_gen_' >> patterns.txt
++// RUN: echo 'store i8 %[0-9]\+, i8\* getelementptr inbounds (\[[0-9]\+ x i8\], \[[0-9]\+ x i8\]\* @__sancov_gen_'  >> patterns.txt
++
++// Check indirect-calls
++// RUN: echo 'call void @__sanitizer_cov_trace_pc_indir'                                                            >> patterns.txt
++
++// Check trace-cmp
++// RUN: echo 'call void @__sanitizer_cov_trace_cmp4'                                                                >> patterns.txt
++
++// Check pc-table
++// RUN: echo 'section "__sancov_pcs"'                                                                               >> patterns.txt
++
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table                                                                                      2>&1 |     grep -f patterns.txt | count 14
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_all.txt                                             2>&1 |     grep -f patterns.txt | count 14
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_none.txt                                            2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_file.txt                                            2>&1 |     grep -f patterns.txt | count 14
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_foo.txt                                             2>&1 |     grep -f patterns.txt | count 9
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_bar.txt                                             2>&1 |     grep -f patterns.txt | count 5
++
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table                                           -fsanitize-coverage-blacklist=bl_all.txt   2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_all.txt  -fsanitize-coverage-blacklist=bl_all.txt   2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_none.txt -fsanitize-coverage-blacklist=bl_all.txt   2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_file.txt -fsanitize-coverage-blacklist=bl_all.txt   2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_foo.txt  -fsanitize-coverage-blacklist=bl_all.txt   2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_bar.txt  -fsanitize-coverage-blacklist=bl_all.txt   2>&1 | not grep -f patterns.txt
++
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table                                           -fsanitize-coverage-blacklist=bl_none.txt  2>&1 |     grep -f patterns.txt | count 14
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_all.txt  -fsanitize-coverage-blacklist=bl_none.txt  2>&1 |     grep -f patterns.txt | count 14
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_none.txt -fsanitize-coverage-blacklist=bl_none.txt  2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_file.txt -fsanitize-coverage-blacklist=bl_none.txt  2>&1 |     grep -f patterns.txt | count 14
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_foo.txt  -fsanitize-coverage-blacklist=bl_none.txt  2>&1 |     grep -f patterns.txt | count 9
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_bar.txt  -fsanitize-coverage-blacklist=bl_none.txt  2>&1 |     grep -f patterns.txt | count 5
++
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table                                           -fsanitize-coverage-blacklist=bl_file.txt  2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_all.txt  -fsanitize-coverage-blacklist=bl_file.txt  2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_none.txt -fsanitize-coverage-blacklist=bl_file.txt  2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_file.txt -fsanitize-coverage-blacklist=bl_file.txt  2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_foo.txt  -fsanitize-coverage-blacklist=bl_file.txt  2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_bar.txt  -fsanitize-coverage-blacklist=bl_file.txt  2>&1 | not grep -f patterns.txt
++
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table                                           -fsanitize-coverage-blacklist=bl_foo.txt   2>&1 |     grep -f patterns.txt | count 5
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_all.txt  -fsanitize-coverage-blacklist=bl_foo.txt   2>&1 |     grep -f patterns.txt | count 5
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_none.txt -fsanitize-coverage-blacklist=bl_foo.txt   2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_file.txt -fsanitize-coverage-blacklist=bl_foo.txt   2>&1 |     grep -f patterns.txt | count 5
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_foo.txt  -fsanitize-coverage-blacklist=bl_foo.txt   2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_bar.txt  -fsanitize-coverage-blacklist=bl_foo.txt   2>&1 |     grep -f patterns.txt | count 5
++
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table                                           -fsanitize-coverage-blacklist=bl_bar.txt   2>&1 |     grep -f patterns.txt | count 9
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_all.txt  -fsanitize-coverage-blacklist=bl_bar.txt   2>&1 |     grep -f patterns.txt | count 9
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_none.txt -fsanitize-coverage-blacklist=bl_bar.txt   2>&1 | not grep -f patterns.txt
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_file.txt -fsanitize-coverage-blacklist=bl_bar.txt   2>&1 |     grep -f patterns.txt | count 9
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_foo.txt  -fsanitize-coverage-blacklist=bl_bar.txt   2>&1 |     grep -f patterns.txt | count 9
++// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_bar.txt  -fsanitize-coverage-blacklist=bl_bar.txt   2>&1 | not grep -f patterns.txt
++
++// RUN: rm wl_*.txt
++// RUN: rm bl_*.txt
++// RUN: rm patterns.txt
++
++// foo has 3 instrumentation points, 0 indirect call, 1 comparison point
++
++// Expected results with patterns.txt when foo gets instrumentation with
++// libFuzzer-like coverage options: 9 lines
++//   inline-8bit-counters ->
++//     @__sancov_gen_XX = private global [3 x i8] zeroinitializer, section "__sancov_cntrs"...
++//     %XX = load i8, i8* getelementptr inbounds ([3 x i8], [3 x i8]* @__sancov_gen_, i64 0, i64 0)...
++//     %XX = load i8, i8* getelementptr inbounds ([3 x i8], [3 x i8]* @__sancov_gen_, i64 0, i64 1)...
++//     %XX = load i8, i8* getelementptr inbounds ([3 x i8], [3 x i8]* @__sancov_gen_, i64 0, i64 2)...
++//     store i8 %XX, i8* getelementptr inbounds ([3 x i8], [3 x i8]* @__sancov_gen_, i64 0, i64 0)...
++//     store i8 %XX, i8* getelementptr inbounds ([3 x i8], [3 x i8]* @__sancov_gen_, i64 0, i64 1)...
++//     store i8 %XX, i8* getelementptr inbounds ([3 x i8], [3 x i8]* @__sancov_gen_, i64 0, i64 2)...
++//   trace-cmp ->
++//     call void @__sanitizer_cov_trace_cmp4(i32 %XX, i32 %XX)
++//   pc-table ->
++//     @__sancov_gen_XX = private constant [6 x i64*] ..., section "__sancov_pcs"...
++
++bool foo(int *a, int *b) {
++  if (*a == *b) {
++    return true;
++  }
++  return false;
++}
++
++// bar has 1 instrumentation point, 1 indirect call, 0 comparison point
++
++// Expected results with patterns.txt when bar gets instrumentation with
++// libFuzzer-like coverage options: 5 lines
++//   inline-8bit-counters ->
++//     @__sancov_gen_XX = private global [1 x i8] zeroinitializer, section "__sancov_cntrs"...
++//     %XX = load i8, i8* getelementptr inbounds ([1 x i8], [1 x i8]* @__sancov_gen_.2, i64 0, i64 0), ...
++//     store i8 %XX, i8* getelementptr inbounds ([1 x i8], [1 x i8]* @__sancov_gen_.2, i64 0, i64 0), ...
++//   indirect-calls ->
++//     call void @__sanitizer_cov_trace_pc_indir(i64 %XX)
++//   pc-table ->
++//     @__sancov_gen_XX = private constant [2 x i64*] ..., section "__sancov_pcs"...
++
++void bar(void (*f)()) { f(); }
+diff --git a/llvm/include/llvm/Transforms/Instrumentation.h b/llvm/include/llvm/Transforms/Instrumentation.h
+--- a/llvm/include/llvm/Transforms/Instrumentation.h
++++ b/llvm/include/llvm/Transforms/Instrumentation.h
+@@ -183,7 +183,9 @@
+ 
+ // Insert SanitizerCoverage instrumentation.
+ ModulePass *createSanitizerCoverageModulePass(
+-    const SanitizerCoverageOptions &Options = SanitizerCoverageOptions());
++    const SanitizerCoverageOptions &Options = SanitizerCoverageOptions(),
++    const std::vector<std::string>& WhitelistFiles = std::vector<std::string>(),
++    const std::vector<std::string>& BlacklistFiles = std::vector<std::string>());
+ 
+ /// Calculate what to divide by to scale counts.
+ ///
+diff --git a/llvm/lib/Transforms/Instrumentation/SanitizerCoverage.cpp b/llvm/lib/Transforms/Instrumentation/SanitizerCoverage.cpp
+--- a/llvm/lib/Transforms/Instrumentation/SanitizerCoverage.cpp
++++ b/llvm/lib/Transforms/Instrumentation/SanitizerCoverage.cpp
+@@ -34,6 +34,7 @@
+ #include "llvm/Support/CommandLine.h"
+ #include "llvm/Support/Debug.h"
+ #include "llvm/Support/raw_ostream.h"
++#include "llvm/Support/SpecialCaseList.h"
+ #include "llvm/Transforms/Instrumentation.h"
+ #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+ #include "llvm/Transforms/Utils/ModuleUtils.h"
+@@ -179,8 +180,16 @@
+ class SanitizerCoverageModule : public ModulePass {
+ public:
+   SanitizerCoverageModule(
+-      const SanitizerCoverageOptions &Options = SanitizerCoverageOptions())
++      const SanitizerCoverageOptions &Options = SanitizerCoverageOptions(),
++      const std::vector<std::string> &WhitelistFiles =
++          std::vector<std::string>(),
++      const std::vector<std::string> &BlacklistFiles =
++          std::vector<std::string>())
+       : ModulePass(ID), Options(OverrideFromCL(Options)) {
++    if (WhitelistFiles.size() > 0)
++      Whitelist = SpecialCaseList::createOrDie(WhitelistFiles);
++    if (BlacklistFiles.size() > 0)
++      Blacklist = SpecialCaseList::createOrDie(BlacklistFiles);
+     initializeSanitizerCoverageModulePass(*PassRegistry::getPassRegistry());
+   }
+   bool runOnModule(Module &M) override;
+@@ -250,6 +259,9 @@
+   SmallVector<GlobalValue *, 20> GlobalsToAppendToCompilerUsed;
+ 
+   SanitizerCoverageOptions Options;
++
++  std::unique_ptr<SpecialCaseList> Whitelist;
++  std::unique_ptr<SpecialCaseList> Blacklist;
+ };
+ 
+ } // namespace
+@@ -313,6 +325,12 @@
+ bool SanitizerCoverageModule::runOnModule(Module &M) {
+   if (Options.CoverageType == SanitizerCoverageOptions::SCK_None)
+     return false;
++  if (Whitelist &&
++      !Whitelist->inSection("coverage", "src", M.getSourceFileName()))
++    return false;
++  if (Blacklist &&
++      Blacklist->inSection("coverage", "src", M.getSourceFileName()))
++    return false;
+   C = &(M.getContext());
+   DL = &M.getDataLayout();
+   CurModule = &M;
+@@ -541,6 +559,10 @@
+   if (F.hasPersonalityFn() &&
+       isAsynchronousEHPersonality(classifyEHPersonality(F.getPersonalityFn())))
+     return false;
++  if (Whitelist && !Whitelist->inSection("coverage", "fun", F.getName()))
++    return false;
++  if (Blacklist && Blacklist->inSection("coverage", "fun", F.getName()))
++    return false;
+   if (Options.CoverageType >= SanitizerCoverageOptions::SCK_Edge)
+     SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions().setIgnoreUnreachableDests());
+   SmallVector<Instruction *, 8> IndirCalls;
+@@ -898,6 +920,8 @@
+                     "ModulePass",
+                     false, false)
+ ModulePass *llvm::createSanitizerCoverageModulePass(
+-    const SanitizerCoverageOptions &Options) {
+-  return new SanitizerCoverageModule(Options);
++    const SanitizerCoverageOptions &Options,
++    const std::vector<std::string> &WhitelistFiles,
++    const std::vector<std::string> &BlacklistFiles) {
++  return new SanitizerCoverageModule(Options, WhitelistFiles, BlacklistFiles);
+ }
+

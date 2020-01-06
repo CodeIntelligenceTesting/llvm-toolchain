@@ -2,3 +2,5 @@ src
 build
 centos
 llvm-*
+llvmorg-*.tar.gz
+destdir

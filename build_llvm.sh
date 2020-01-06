@@ -15,6 +15,9 @@ if [[ ! -e ${SRC_DIR} ]]
 then
     wget https://github.com/llvm/llvm-project/archive/llvmorg-${LLVM_RELEASE}.tar.gz
     tar xf llvmorg-${LLVM_RELEASE}.tar.gz
+    pushd ${SRC_DIR}
+    git apply ../fsanitize-coverage-blacklist.patch
+    popd
 fi
 
 export DESTDIR=$PWD/destdir

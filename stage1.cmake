@@ -11,7 +11,7 @@ set(LLVM_TARGETS_TO_BUILD Native CACHE STRING "")
 set(CMAKE_BUILD_TYPE Release CACHE STRING "")
 
 # Setup vendor-specific settings.
-set(PACKAGE_VENDOR LLVM.org CACHE STRING "")
+set(PACKAGE_VENDOR "Code Intelligence GmbH" CACHE STRING "")
 
 # Setting up the stage2 LTO option needs to be done on the stage1 build so that
 # the proper LTO library dependencies can be connected.
@@ -28,7 +28,8 @@ set(LIBCXX_INCLUDE_TESTS OFF CACHE BOOL "")
 
 set(LLVM_PARALLEL_LINK_JOBS "1" CACHE STRING "")
 
-set(LLVM_TEMPORARILY_ALLOW_OLD_TOOLCHAIN=ON ON CACHE BOOL "")
+# Allow old gcc from CentOS 6 for stage 1 build
+set(LLVM_TEMPORARILY_ALLOW_OLD_TOOLCHAIN ON CACHE BOOL "")
 
 # Expose stage2 targets through the stage1 build configuration.
 set(CLANG_BOOTSTRAP_TARGETS
