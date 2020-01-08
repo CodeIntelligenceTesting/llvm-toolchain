@@ -33,7 +33,8 @@ cmake -G Ninja -C ../stage1.cmake ../${SRC_DIR}/llvm
 ninja cxx
 export LD_LIBRARY_PATH=$PWD/lib
 ninja stage2-install
-
+ninja install-llvm-headers
+ninja install-clang-headers
 popd
 
 # Files are installed in /usr/local,  move them out.
