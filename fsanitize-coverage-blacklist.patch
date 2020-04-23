@@ -1,7 +1,7 @@
 diff --git a/clang/docs/SanitizerCoverage.rst b/clang/docs/SanitizerCoverage.rst
 --- a/clang/docs/SanitizerCoverage.rst
 +++ b/clang/docs/SanitizerCoverage.rst
-@@ -289,6 +289,58 @@
+@@ -312,6 +312,58 @@
    // for every non-constant array index.
    void __sanitizer_cov_trace_gep(uintptr_t Idx);
  
@@ -83,8 +83,8 @@ diff --git a/clang/include/clang/Basic/CodeGenOptions.h b/clang/include/clang/Ba
 diff --git a/clang/include/clang/Basic/DiagnosticDriverKinds.td b/clang/include/clang/Basic/DiagnosticDriverKinds.td
 --- a/clang/include/clang/Basic/DiagnosticDriverKinds.td
 +++ b/clang/include/clang/Basic/DiagnosticDriverKinds.td
-@@ -147,6 +147,10 @@
-   "invalid argument '%0' to -fdebug-prefix-map">;
+@@ -158,6 +158,10 @@
+   "invalid argument '%0' to -%1">;
  def err_drv_malformed_sanitizer_blacklist : Error<
    "malformed sanitizer blacklist: '%0'">;
 +def err_drv_malformed_sanitizer_coverage_whitelist : Error<
@@ -97,7 +97,7 @@ diff --git a/clang/include/clang/Basic/DiagnosticDriverKinds.td b/clang/include/
 diff --git a/clang/include/clang/Driver/Options.td b/clang/include/clang/Driver/Options.td
 --- a/clang/include/clang/Driver/Options.td
 +++ b/clang/include/clang/Driver/Options.td
-@@ -966,6 +966,12 @@
+@@ -1001,6 +1001,12 @@
        Group<f_clang_Group>, Flags<[CoreOption, DriverOption]>,
        HelpText<"Disable specified features of coverage instrumentation for "
                 "Sanitizers">, Values<"func,bb,edge,indirect-calls,trace-bb,trace-cmp,trace-div,trace-gep,8bit-counters,trace-pc,trace-pc-guard,no-prune,inline-8bit-counters">;
@@ -113,24 +113,24 @@ diff --git a/clang/include/clang/Driver/Options.td b/clang/include/clang/Driver/
 diff --git a/clang/include/clang/Driver/SanitizerArgs.h b/clang/include/clang/Driver/SanitizerArgs.h
 --- a/clang/include/clang/Driver/SanitizerArgs.h
 +++ b/clang/include/clang/Driver/SanitizerArgs.h
-@@ -26,6 +26,8 @@
-   SanitizerSet TrapSanitizers;
+@@ -27,6 +27,8 @@
  
-   std::vector<std::string> BlacklistFiles;
+   std::vector<std::string> UserBlacklistFiles;
+   std::vector<std::string> SystemBlacklistFiles;
 +  std::vector<std::string> CoverageWhitelistFiles;
 +  std::vector<std::string> CoverageBlacklistFiles;
-   std::vector<std::string> ExtraDeps;
    int CoverageFeatures = 0;
    int MsanTrackOrigins = 0;
+   bool MsanUseAfterDtor = true;
 diff --git a/clang/lib/CodeGen/BackendUtil.cpp b/clang/lib/CodeGen/BackendUtil.cpp
 --- a/clang/lib/CodeGen/BackendUtil.cpp
 +++ b/clang/lib/CodeGen/BackendUtil.cpp
-@@ -215,7 +215,9 @@
-   Opts.Inline8bitCounters = CGOpts.SanitizeCoverageInline8bitCounters;
-   Opts.PCTable = CGOpts.SanitizeCoveragePCTable;
-   Opts.StackDepth = CGOpts.SanitizeCoverageStackDepth;
--  PM.add(createSanitizerCoverageModulePass(Opts));
-+  PM.add(createSanitizerCoverageModulePass(
+@@ -234,7 +234,9 @@
+       static_cast<const PassManagerBuilderWrapper &>(Builder);
+   const CodeGenOptions &CGOpts = BuilderWrapper.getCGOpts();
+   auto Opts = getSancovOptsFromCGOpts(CGOpts);
+-  PM.add(createModuleSanitizerCoverageLegacyPassPass(Opts));
++  PM.add(createModuleSanitizerCoverageLegacyPassPass(
 +      Opts, CGOpts.SanitizeCoverageWhitelistFiles,
 +      CGOpts.SanitizeCoverageBlacklistFiles));
  }
@@ -139,132 +139,188 @@ diff --git a/clang/lib/CodeGen/BackendUtil.cpp b/clang/lib/CodeGen/BackendUtil.c
 diff --git a/clang/lib/Driver/SanitizerArgs.cpp b/clang/lib/Driver/SanitizerArgs.cpp
 --- a/clang/lib/Driver/SanitizerArgs.cpp
 +++ b/clang/lib/Driver/SanitizerArgs.cpp
-@@ -199,6 +199,46 @@
-   return TrappingKinds;
+@@ -151,6 +151,40 @@
+   }
  }
  
 +/// Parse -f(no-)?sanitize-(coverage-)?(white|black)list argument's values,
-+/// diagnosing any invalid file paths.
++/// diagnosing any invalid file paths and validating special case list format.
 +static void parseSpecialCaseListArg(const Driver &D,
 +                                    const llvm::opt::ArgList &Args,
 +                                    std::vector<std::string> &SCLFiles,
-+                                    std::vector<std::string> &ExtraDeps,
 +                                    llvm::opt::OptSpecifier SCLOptionID,
 +                                    llvm::opt::OptSpecifier NoSCLOptionID,
 +                                    unsigned MalformedSCLErrorDiagID) {
-+  size_t ExtraDepsInitialSize = ExtraDeps.size();
 +  for (const auto *Arg : Args) {
-+    // Match -fsanitize-(coverage-)?(white|black)list
++    // Match -fsanitize-(coverage-)?(white|black)list.
 +    if (Arg->getOption().matches(SCLOptionID)) {
 +      Arg->claim();
 +      std::string SCLPath = Arg->getValue();
-+      if (llvm::sys::fs::exists(SCLPath)) {
++      if (D.getVFS().exists(SCLPath)) {
 +        SCLFiles.push_back(SCLPath);
-+        ExtraDeps.push_back(SCLPath);
 +      } else {
 +        D.Diag(clang::diag::err_drv_no_such_file) << SCLPath;
 +      }
-+    }
-+    // Match -fno-sanitize-blacklist
-+    else if (NoSCLOptionID.isValid() &&
-+             Arg->getOption().matches(NoSCLOptionID)) {
++      // Match -fno-sanitize-blacklist.
++    } else if (Arg->getOption().matches(NoSCLOptionID)) {
 +      Arg->claim();
 +      SCLFiles.clear();
-+      ExtraDeps.resize(ExtraDepsInitialSize);
 +    }
 +  }
-+  // Validate whitelist or blacklist format.
-+  if (SCLFiles.size() > 0) {
-+    std::string SCLError;
++  // Validate special case list format.
++  {
++    std::string BLError;
 +    std::unique_ptr<llvm::SpecialCaseList> SCL(
-+        llvm::SpecialCaseList::create(SCLFiles, SCLError));
++        llvm::SpecialCaseList::create(SCLFiles, D.getVFS(), BLError));
 +    if (!SCL.get())
-+      D.Diag(MalformedSCLErrorDiagID) << SCLError;
++      D.Diag(MalformedSCLErrorDiagID) << BLError;
 +  }
 +}
 +
- bool SanitizerArgs::needsUbsanRt() const {
-   // All of these include ubsan.
-   if (needsAsanRt() || needsMsanRt() || needsHwasanRt() || needsTsanRt() ||
-@@ -548,31 +588,19 @@
+ /// Sets group bits for every group that has at least one representative already
+ /// enabled in \p Kinds.
+ static SanitizerMask setGroupBits(SanitizerMask Kinds) {
+@@ -561,37 +595,18 @@
    // Setup blacklist files.
    // Add default blacklist from resource directory.
-   addDefaultBlacklists(D, Kinds, BlacklistFiles);
+   addDefaultBlacklists(D, Kinds, SystemBlacklistFiles);
 -  // Parse -f(no-)sanitize-blacklist options.
 -  for (const auto *Arg : Args) {
 -    if (Arg->getOption().matches(options::OPT_fsanitize_blacklist)) {
 -      Arg->claim();
 -      std::string BLPath = Arg->getValue();
--      if (llvm::sys::fs::exists(BLPath)) {
--        BlacklistFiles.push_back(BLPath);
--        ExtraDeps.push_back(BLPath);
+-      if (D.getVFS().exists(BLPath)) {
+-        UserBlacklistFiles.push_back(BLPath);
 -      } else {
 -        D.Diag(clang::diag::err_drv_no_such_file) << BLPath;
 -      }
 -    } else if (Arg->getOption().matches(options::OPT_fno_sanitize_blacklist)) {
 -      Arg->claim();
--      BlacklistFiles.clear();
--      ExtraDeps.clear();
+-      UserBlacklistFiles.clear();
+-      SystemBlacklistFiles.clear();
 -    }
 -  }
 -  // Validate blacklists format.
 -  {
 -    std::string BLError;
 -    std::unique_ptr<llvm::SpecialCaseList> SCL(
--        llvm::SpecialCaseList::create(BlacklistFiles, BLError));
+-        llvm::SpecialCaseList::create(UserBlacklistFiles, D.getVFS(), BLError));
 -    if (!SCL.get())
 -      D.Diag(clang::diag::err_drv_malformed_sanitizer_blacklist) << BLError;
 -  }
-+  // Parse -f(no-)?sanitize-(coverage-)?(black|white)list options.
-+  parseSpecialCaseListArg(D, Args, BlacklistFiles, ExtraDeps,
+-  {
+-    std::string BLError;
+-    std::unique_ptr<llvm::SpecialCaseList> SCL(llvm::SpecialCaseList::create(
+-        SystemBlacklistFiles, D.getVFS(), BLError));
+-    if (!SCL.get())
+-      D.Diag(clang::diag::err_drv_malformed_sanitizer_blacklist) << BLError;
+-  }
++
++  // Parse -f(no-)?sanitize-blacklist options.
++  // This also validates special case lists format.
++  // Here, OptSpecifier() acts as a never-matching command-line argument.
++  // So, there is no way to append to system blacklist but it can be cleared.
++  parseSpecialCaseListArg(D, Args, SystemBlacklistFiles, OptSpecifier(),
++                          options::OPT_fno_sanitize_blacklist,
++                          clang::diag::err_drv_malformed_sanitizer_blacklist);
++  parseSpecialCaseListArg(D, Args, UserBlacklistFiles,
 +                          options::OPT_fsanitize_blacklist,
 +                          options::OPT_fno_sanitize_blacklist,
 +                          clang::diag::err_drv_malformed_sanitizer_blacklist);
-+  parseSpecialCaseListArg(
-+      D, Args, CoverageWhitelistFiles, ExtraDeps,
-+      options::OPT_fsanitize_coverage_whitelist, OptSpecifier(),
-+      clang::diag::err_drv_malformed_sanitizer_coverage_whitelist);
-+  parseSpecialCaseListArg(
-+      D, Args, CoverageBlacklistFiles, ExtraDeps,
-+      options::OPT_fsanitize_coverage_blacklist, OptSpecifier(),
-+      clang::diag::err_drv_malformed_sanitizer_coverage_blacklist);
  
    // Parse -f[no-]sanitize-memory-track-origins[=level] options.
    if (AllAddedKinds & SanitizerKind::Memory) {
-@@ -925,6 +953,16 @@
-     BlacklistOpt += BLPath;
-     CmdArgs.push_back(Args.MakeArgString(BlacklistOpt));
+@@ -745,6 +760,21 @@
+       CoverageFeatures |= CoverageFunc;
    }
-+  for (const auto &CWLPath : CoverageWhitelistFiles) {
-+    SmallString<64> CoverageWhitelistOpt("-fsanitize-coverage-whitelist=");
-+    CoverageWhitelistOpt += CWLPath;
-+    CmdArgs.push_back(Args.MakeArgString(CoverageWhitelistOpt));
+ 
++  // Parse -fsanitize-coverage-(black|white)list options if coverage enabled.
++  // This also validates special case lists format.
++  // Here, OptSpecifier() acts as a never-matching command-line argument.
++  // So, there is no way to clear coverage lists but you can append to them.
++  if (CoverageFeatures) {
++    parseSpecialCaseListArg(
++        D, Args, CoverageWhitelistFiles,
++        options::OPT_fsanitize_coverage_whitelist, OptSpecifier(),
++        clang::diag::err_drv_malformed_sanitizer_coverage_whitelist);
++    parseSpecialCaseListArg(
++        D, Args, CoverageBlacklistFiles,
++        options::OPT_fsanitize_coverage_blacklist, OptSpecifier(),
++        clang::diag::err_drv_malformed_sanitizer_coverage_blacklist);
 +  }
-+  for (const auto &CBLPath : CoverageBlacklistFiles) {
-+    SmallString<64> CoverageBlacklistOpt("-fsanitize-coverage-blacklist=");
-+    CoverageBlacklistOpt += CBLPath;
-+    CmdArgs.push_back(Args.MakeArgString(CoverageBlacklistOpt));
++
+   SharedRuntime =
+       Args.hasFlag(options::OPT_shared_libsan, options::OPT_static_libsan,
+                    TC.getTriple().isAndroid() || TC.getTriple().isOSFuchsia() ||
+@@ -871,6 +901,17 @@
+   return Res;
+ }
+ 
++static void addSpecialCaseListOpt(const llvm::opt::ArgList &Args,
++                                  llvm::opt::ArgStringList &CmdArgs,
++                                  const char *SCLOptFlag,
++                                  const std::vector<std::string> &SCLFiles) {
++  for (const auto &SCLPath : SCLFiles) {
++    SmallString<64> SCLOpt(SCLOptFlag);
++    SCLOpt += SCLPath;
++    CmdArgs.push_back(Args.MakeArgString(SCLOpt));
 +  }
-   for (const auto &Dep : ExtraDeps) {
-     SmallString<64> ExtraDepOpt("-fdepfile-entry=");
-     ExtraDepOpt += Dep;
++}
++
+ static void addIncludeLinkerOption(const ToolChain &TC,
+                                    const llvm::opt::ArgList &Args,
+                                    llvm::opt::ArgStringList &CmdArgs,
+@@ -933,6 +974,10 @@
+     if (CoverageFeatures & F.first)
+       CmdArgs.push_back(F.second);
+   }
++  addSpecialCaseListOpt(
++      Args, CmdArgs, "-fsanitize-coverage-whitelist=", CoverageWhitelistFiles);
++  addSpecialCaseListOpt(
++      Args, CmdArgs, "-fsanitize-coverage-blacklist=", CoverageBlacklistFiles);
+ 
+   if (TC.getTriple().isOSWindows() && needsUbsanRt()) {
+     // Instruct the code generator to embed linker directives in the object file
+@@ -968,16 +1013,10 @@
+     CmdArgs.push_back(
+         Args.MakeArgString("-fsanitize-trap=" + toString(TrapSanitizers)));
+ 
+-  for (const auto &BLPath : UserBlacklistFiles) {
+-    SmallString<64> BlacklistOpt("-fsanitize-blacklist=");
+-    BlacklistOpt += BLPath;
+-    CmdArgs.push_back(Args.MakeArgString(BlacklistOpt));
+-  }
+-  for (const auto &BLPath : SystemBlacklistFiles) {
+-    SmallString<64> BlacklistOpt("-fsanitize-system-blacklist=");
+-    BlacklistOpt += BLPath;
+-    CmdArgs.push_back(Args.MakeArgString(BlacklistOpt));
+-  }
++  addSpecialCaseListOpt(Args, CmdArgs,
++                        "-fsanitize-blacklist=", UserBlacklistFiles);
++  addSpecialCaseListOpt(Args, CmdArgs,
++                        "-fsanitize-system-blacklist=", SystemBlacklistFiles);
+ 
+   if (MsanTrackOrigins)
+     CmdArgs.push_back(Args.MakeArgString("-fsanitize-memory-track-origins=" +
 diff --git a/clang/lib/Frontend/CompilerInvocation.cpp b/clang/lib/Frontend/CompilerInvocation.cpp
 --- a/clang/lib/Frontend/CompilerInvocation.cpp
 +++ b/clang/lib/Frontend/CompilerInvocation.cpp
-@@ -1111,6 +1111,8 @@
+@@ -1181,6 +1181,10 @@
    Opts.SanitizeCoveragePCTable = Args.hasArg(OPT_fsanitize_coverage_pc_table);
    Opts.SanitizeCoverageStackDepth =
        Args.hasArg(OPT_fsanitize_coverage_stack_depth);
-+  Opts.SanitizeCoverageWhitelistFiles = Args.getAllArgValues(OPT_fsanitize_coverage_whitelist);
-+  Opts.SanitizeCoverageBlacklistFiles = Args.getAllArgValues(OPT_fsanitize_coverage_blacklist);
++  Opts.SanitizeCoverageWhitelistFiles =
++      Args.getAllArgValues(OPT_fsanitize_coverage_whitelist);
++  Opts.SanitizeCoverageBlacklistFiles =
++      Args.getAllArgValues(OPT_fsanitize_coverage_blacklist);
    Opts.SanitizeMemoryTrackOrigins =
        getLastArgIntValue(Args, OPT_fsanitize_memory_track_origins_EQ, 0, Diags);
    Opts.SanitizeMemoryUseAfterDtor =
-diff --git a/compiler-rt/test/sanitizer_common/TestCases/sanitizer_coverage_whitelist_blacklist.cc b/compiler-rt/test/sanitizer_common/TestCases/sanitizer_coverage_whitelist_blacklist.cc
+diff --git a/compiler-rt/test/sanitizer_common/TestCases/sanitizer_coverage_whitelist_blacklist.cpp b/compiler-rt/test/sanitizer_common/TestCases/sanitizer_coverage_whitelist_blacklist.cpp
 new file mode 100644
 --- /dev/null
-+++ b/compiler-rt/test/sanitizer_common/TestCases/sanitizer_coverage_whitelist_blacklist.cc
-@@ -0,0 +1,118 @@
++++ b/compiler-rt/test/sanitizer_common/TestCases/sanitizer_coverage_whitelist_blacklist.cpp
+@@ -0,0 +1,123 @@
 +// Tests -fsanitize-coverage-whitelist=whitelist.txt and
 +// -fsanitize-coverage-blacklist=blacklist.txt with libFuzzer-like coverage
 +// options
@@ -273,6 +329,11 @@ new file mode 100644
 +// UNSUPPORTED: i386-darwin
 +// XFAIL: ubsan,tsan
 +// XFAIL: android && asan
++
++// RUN: DIR=%t_workdir
++// RUN: rm -rf $DIR
++// RUN: mkdir -p $DIR
++// RUN: cd $DIR
 +
 +// RUN: echo -e "src:*\nfun:*"     > wl_all.txt
 +// RUN: echo -e ""                 > wl_none.txt
@@ -341,9 +402,9 @@ new file mode 100644
 +// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_foo.txt  -fsanitize-coverage-blacklist=bl_bar.txt   2>&1 |     grep -f patterns.txt | count 9
 +// RUN: %clangxx -O0 %s -S -o - -emit-llvm -fsanitize-coverage=inline-8bit-counters,indirect-calls,trace-cmp,pc-table -fsanitize-coverage-whitelist=wl_bar.txt  -fsanitize-coverage-blacklist=bl_bar.txt   2>&1 | not grep -f patterns.txt
 +
-+// RUN: rm wl_*.txt
-+// RUN: rm bl_*.txt
-+// RUN: rm patterns.txt
++// RUN: cd -
++// RUN: rm -rf $DIR
++
 +
 +// foo has 3 instrumentation points, 0 indirect call, 1 comparison point
 +
@@ -383,52 +444,85 @@ new file mode 100644
 +//     @__sancov_gen_XX = private constant [2 x i64*] ..., section "__sancov_pcs"...
 +
 +void bar(void (*f)()) { f(); }
-diff --git a/llvm/include/llvm/Transforms/Instrumentation.h b/llvm/include/llvm/Transforms/Instrumentation.h
---- a/llvm/include/llvm/Transforms/Instrumentation.h
-+++ b/llvm/include/llvm/Transforms/Instrumentation.h
-@@ -183,7 +183,9 @@
+diff --git a/llvm/include/llvm/Transforms/Instrumentation/SanitizerCoverage.h b/llvm/include/llvm/Transforms/Instrumentation/SanitizerCoverage.h
+--- a/llvm/include/llvm/Transforms/Instrumentation/SanitizerCoverage.h
++++ b/llvm/include/llvm/Transforms/Instrumentation/SanitizerCoverage.h
+@@ -40,7 +40,10 @@
  
  // Insert SanitizerCoverage instrumentation.
- ModulePass *createSanitizerCoverageModulePass(
+ ModulePass *createModuleSanitizerCoverageLegacyPassPass(
 -    const SanitizerCoverageOptions &Options = SanitizerCoverageOptions());
 +    const SanitizerCoverageOptions &Options = SanitizerCoverageOptions(),
-+    const std::vector<std::string>& WhitelistFiles = std::vector<std::string>(),
-+    const std::vector<std::string>& BlacklistFiles = std::vector<std::string>());
++    const std::vector<std::string> &WhitelistFiles = std::vector<std::string>(),
++    const std::vector<std::string> &BlacklistFiles =
++        std::vector<std::string>());
  
- /// Calculate what to divide by to scale counts.
- ///
+ } // namespace llvm
+ 
 diff --git a/llvm/lib/Transforms/Instrumentation/SanitizerCoverage.cpp b/llvm/lib/Transforms/Instrumentation/SanitizerCoverage.cpp
 --- a/llvm/lib/Transforms/Instrumentation/SanitizerCoverage.cpp
 +++ b/llvm/lib/Transforms/Instrumentation/SanitizerCoverage.cpp
-@@ -34,6 +34,7 @@
+@@ -35,6 +35,8 @@
+ #include "llvm/InitializePasses.h"
  #include "llvm/Support/CommandLine.h"
  #include "llvm/Support/Debug.h"
- #include "llvm/Support/raw_ostream.h"
 +#include "llvm/Support/SpecialCaseList.h"
++#include "llvm/Support/VirtualFileSystem.h"
+ #include "llvm/Support/raw_ostream.h"
  #include "llvm/Transforms/Instrumentation.h"
  #include "llvm/Transforms/Utils/BasicBlockUtils.h"
- #include "llvm/Transforms/Utils/ModuleUtils.h"
-@@ -179,8 +180,16 @@
- class SanitizerCoverageModule : public ModulePass {
+@@ -198,8 +200,11 @@
+ class ModuleSanitizerCoverage {
  public:
-   SanitizerCoverageModule(
+   ModuleSanitizerCoverage(
+-      const SanitizerCoverageOptions &Options = SanitizerCoverageOptions())
+-      : Options(OverrideFromCL(Options)) {}
++      const SanitizerCoverageOptions &Options = SanitizerCoverageOptions(),
++      const SpecialCaseList *Whitelist = nullptr,
++      const SpecialCaseList *Blacklist = nullptr)
++      : Options(OverrideFromCL(Options)), Whitelist(Whitelist),
++        Blacklist(Blacklist) {}
+   bool instrumentModule(Module &M, DomTreeCallback DTCallback,
+                         PostDomTreeCallback PDTCallback);
+ 
+@@ -263,18 +268,32 @@
+   SmallVector<GlobalValue *, 20> GlobalsToAppendToCompilerUsed;
+ 
+   SanitizerCoverageOptions Options;
++
++  const SpecialCaseList *Whitelist;
++  const SpecialCaseList *Blacklist;
+ };
+ 
+ class ModuleSanitizerCoverageLegacyPass : public ModulePass {
+ public:
+   ModuleSanitizerCoverageLegacyPass(
 -      const SanitizerCoverageOptions &Options = SanitizerCoverageOptions())
 +      const SanitizerCoverageOptions &Options = SanitizerCoverageOptions(),
 +      const std::vector<std::string> &WhitelistFiles =
 +          std::vector<std::string>(),
 +      const std::vector<std::string> &BlacklistFiles =
 +          std::vector<std::string>())
-       : ModulePass(ID), Options(OverrideFromCL(Options)) {
+       : ModulePass(ID), Options(Options) {
 +    if (WhitelistFiles.size() > 0)
-+      Whitelist = SpecialCaseList::createOrDie(WhitelistFiles);
++      Whitelist = SpecialCaseList::createOrDie(WhitelistFiles,
++                                               *vfs::getRealFileSystem());
 +    if (BlacklistFiles.size() > 0)
-+      Blacklist = SpecialCaseList::createOrDie(BlacklistFiles);
-     initializeSanitizerCoverageModulePass(*PassRegistry::getPassRegistry());
++      Blacklist = SpecialCaseList::createOrDie(BlacklistFiles,
++                                               *vfs::getRealFileSystem());
+     initializeModuleSanitizerCoverageLegacyPassPass(
+         *PassRegistry::getPassRegistry());
    }
-   bool runOnModule(Module &M) override;
-@@ -250,6 +259,9 @@
-   SmallVector<GlobalValue *, 20> GlobalsToAppendToCompilerUsed;
+   bool runOnModule(Module &M) override {
+-    ModuleSanitizerCoverage ModuleSancov(Options);
++    ModuleSanitizerCoverage ModuleSancov(Options, Whitelist.get(),
++                                         Blacklist.get());
+     auto DTCallback = [this](Function &F) -> const DominatorTree * {
+       return &this->getAnalysis<DominatorTreeWrapperPass>(F).getDomTree();
+     };
+@@ -295,6 +314,9 @@
  
+ private:
    SanitizerCoverageOptions Options;
 +
 +  std::unique_ptr<SpecialCaseList> Whitelist;
@@ -436,8 +530,8 @@ diff --git a/llvm/lib/Transforms/Instrumentation/SanitizerCoverage.cpp b/llvm/li
  };
  
  } // namespace
-@@ -313,6 +325,12 @@
- bool SanitizerCoverageModule::runOnModule(Module &M) {
+@@ -374,6 +396,12 @@
+     Module &M, DomTreeCallback DTCallback, PostDomTreeCallback PDTCallback) {
    if (Options.CoverageType == SanitizerCoverageOptions::SCK_None)
      return false;
 +  if (Whitelist &&
@@ -449,26 +543,27 @@ diff --git a/llvm/lib/Transforms/Instrumentation/SanitizerCoverage.cpp b/llvm/li
    C = &(M.getContext());
    DL = &M.getDataLayout();
    CurModule = &M;
-@@ -541,6 +559,10 @@
+@@ -611,6 +639,10 @@
    if (F.hasPersonalityFn() &&
        isAsynchronousEHPersonality(classifyEHPersonality(F.getPersonalityFn())))
-     return false;
+     return;
 +  if (Whitelist && !Whitelist->inSection("coverage", "fun", F.getName()))
-+    return false;
++    return;
 +  if (Blacklist && Blacklist->inSection("coverage", "fun", F.getName()))
-+    return false;
++    return;
    if (Options.CoverageType >= SanitizerCoverageOptions::SCK_Edge)
      SplitAllCriticalEdges(F, CriticalEdgeSplittingOptions().setIgnoreUnreachableDests());
    SmallVector<Instruction *, 8> IndirCalls;
-@@ -898,6 +920,8 @@
-                     "ModulePass",
-                     false, false)
- ModulePass *llvm::createSanitizerCoverageModulePass(
+@@ -976,6 +1008,9 @@
+                     "Pass for instrumenting coverage on functions", false,
+                     false)
+ ModulePass *llvm::createModuleSanitizerCoverageLegacyPassPass(
 -    const SanitizerCoverageOptions &Options) {
--  return new SanitizerCoverageModule(Options);
+-  return new ModuleSanitizerCoverageLegacyPass(Options);
 +    const SanitizerCoverageOptions &Options,
 +    const std::vector<std::string> &WhitelistFiles,
 +    const std::vector<std::string> &BlacklistFiles) {
-+  return new SanitizerCoverageModule(Options, WhitelistFiles, BlacklistFiles);
++  return new ModuleSanitizerCoverageLegacyPass(Options, WhitelistFiles,
++                                               BlacklistFiles);
  }
 
