@@ -1,8 +1,12 @@
-# This file sets up a CMakeCache for a simple distribution bootstrap build.
+# First stage of a bootstrap build, inspired by
+# clang/cmake/caches/DistributionExample.cmake.
 
-#Enable LLVM projects and runtimes
+# Enable LLVM projects
+#
+# We don't use LLVM_ENABLE_RUNTIMES here because it causes issues with clang
+# bootstrap. See the note in build_llvm.sh on why it's still fine to build
+# libc++ and friends as regular projects.
 set(LLVM_ENABLE_PROJECTS "clang;clang-tools-extra;lld;libcxx;libcxxabi;compiler-rt;libunwind" CACHE STRING "")
-# set(LLVM_ENABLE_RUNTIMES "compiler-rt;libcxx;libcxxabi" CACHE STRING "")
 
 # Only build the native target in stage1 since it is a throwaway build.
 set(LLVM_TARGETS_TO_BUILD Native CACHE STRING "")
@@ -22,10 +26,7 @@ if (NOT APPLE)
   set(BOOTSTRAP_LLVM_ENABLE_LLD ON CACHE BOOL "")
 endif()
 
-set(LIBCXX_INSTALL_LIBRARY ON CACHE BOOL "")
-set(LIBCXX_INSTALL_HEADERS ON CACHE BOOL "")
-set(LIBCXX_INCLUDE_TESTS OFF CACHE BOOL "")
-
+# Avoid running out of memory
 set(LLVM_PARALLEL_LINK_JOBS "1" CACHE STRING "")
 
 # Allow old gcc from CentOS 6 for stage 1 build
@@ -43,7 +44,6 @@ set(CLANG_BOOTSTRAP_TARGETS
   clang-test-depends
   distribution
   install-distribution
-  cxx
   clang CACHE STRING "")
 
 # Setup the bootstrap build.

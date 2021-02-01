@@ -1,0 +1,33 @@
+diff --git a/compiler-rt/lib/fuzzer/FuzzerLoop.cpp b/compiler-rt/lib/fuzzer/FuzzerLoop.cpp
+index 451a4c17316..c0ac5ce3bb6 100644
+--- a/compiler-rt/lib/fuzzer/FuzzerLoop.cpp
++++ b/compiler-rt/lib/fuzzer/FuzzerLoop.cpp
+@@ -19,6 +19,7 @@
+ #include <memory>
+ #include <mutex>
+ #include <set>
++#include <stdint.h>
+ 
+ #if defined(__has_include)
+ #if __has_include(<sanitizer / lsan_interface.h>)
+@@ -859,8 +860,18 @@ extern "C" {
+ 
+ ATTRIBUTE_INTERFACE size_t
+ LLVMFuzzerMutate(uint8_t *Data, size_t Size, size_t MaxSize) {
+-  assert(fuzzer::F);
+-  return fuzzer::F->GetMD().DefaultMutate(Data, Size, MaxSize);
++  if (fuzzer::F) {
++    return fuzzer::F->GetMD().DefaultMutate(Data, Size, MaxSize);
++  }
++  unsigned Seed = std::chrono::system_clock::now().time_since_epoch().count();
++  fuzzer::Random Rand(Seed);
++  fuzzer::FuzzingOptions Options;
++  if (!fuzzer::EF) {
++    fuzzer::EF = new fuzzer::ExternalFunctions();
++
++  }
++  fuzzer::MutationDispatcher MD(Rand, Options);
++  return MD.DefaultMutate(Data, Size, MaxSize);
+ }
+ 
+ } // extern "C"
